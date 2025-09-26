@@ -9,6 +9,8 @@ Sliced OT Distances
 #
 # License: MIT License
 
+import warnings
+
 import numpy as np
 from .backend import get_backend, NumpyBackend
 from .utils import list_to_array, get_coordinate_circle, dist
@@ -842,7 +844,8 @@ def min_pivot_sliced(
         return min_perm, min_cost
 
 
-def expected_sliced(X, Y, thetas=None, n_proj=None, order=2, log=False, beta=0.0):
+def expected_sliced(X, Y, thetas=None, n_proj=None, order=2, dense=True,
+                    log=False, beta=0.0):
     r"""
     Computes the Expected Sliced cost and plan between two `(n, d)`
     datasets `X` and `Y`. Given a set of `n_proj` projection directions,
@@ -851,17 +854,22 @@ def expected_sliced(X, Y, thetas=None, n_proj=None, order=2, log=False, beta=0.0
     Expected Sliced was introduced in [84] and further studied in [83].
 
     .. note::
-        The computation ignores potential ambiguities in the projections: if two points from a same measure have the same projection on a direction, then multiple sorting permutations are possible. To avoid combinatorial explosion, only one permutation is retained: this strays from theory in pathological cases.
+        The computation ignores potential ambiguities in the projections: if two
+        points from a same measure have the same projection on a direction, then
+        multiple sorting permutations are possible. To avoid combinatorial
+        explosion, only one permutation is retained: this strays from theory in
+        pathological cases.
 
     .. warning::
-        The function runs on backend but tensorflow and jax are not supported due to array assignment.
+        The function runs on backend but tensorflow and jax are not supported
+        due to array assignment.
 
     Parameters
     ----------
     X : torch.Tensor
-        A tensor of shape (n, d) representing the first set of vectors.
+        A tensor of shape (ns, d) representing the first set of vectors.
     Y : torch.Tensor
-        A tensor of shape (n, d) representing the second set of vectors.
+        A tensor of shape (nt, d) representing the second set of vectors.
     thetas : torch.Tensor, optional
         A tensor of shape (n_proj, d) representing the projection directions.
         If None, random directions will be generated. Default is None.
@@ -869,10 +877,15 @@ def expected_sliced(X, Y, thetas=None, n_proj=None, order=2, log=False, beta=0.0
         The number of projection directions. Required if thetas is None.
     order : int, optional
         Power to elevate the norm. Default is 2.
+    dense: boolean, optional (default=True)
+        If True, returns :math:`\gamma` as a dense ndarray of shape (ns, nt).
+        Otherwise returns a sparse representation using scipy's `coo_matrix`
+        format.
     log : bool, optional
         If True, returns additional logging information. Default is False.
     beta : float, optional
-        Inverse-temperature parameter which weights each projection's contribution to the expected plan. Default is 0 (uniform weighting).
+        Inverse-temperature parameter which weights each projection's
+        contribution to the expected plan. Default is 0 (uniform weighting).
 
     Returns
     -------
@@ -884,9 +897,12 @@ def expected_sliced(X, Y, thetas=None, n_proj=None, order=2, log=False, beta=0.0
 
     References
     ----------
-    .. [83] Tanguy, E., Chapel, L., Delon, J. (2025). Sliced Optimal Transport Plans. arXiv preprint 2506.03661.
+    .. [83] Tanguy, E., Chapel, L., Delon, J. (2025). Sliced Optimal Transport
+    Plans. arXiv preprint 2506.03661.
 
-    .. [84] Liu, X., Diaz Martin, R., Bai Y., Shahbazi A., Thorpe M., Aldroubi A., Kolouri, S. (2024). Expected Sliced Transport Plans. International Conference on Learning Representations.
+    .. [84] Liu, X., Diaz Martin, R., Bai Y., Shahbazi A., Thorpe M., Aldroubi
+    A., Kolouri, S. (2024). Expected Sliced Transport Plans. International 
+    Conference on Learning Representations.
     """
     assert (
         X.shape == Y.shape
@@ -898,7 +914,8 @@ def expected_sliced(X, Y, thetas=None, n_proj=None, order=2, log=False, beta=0.0
             f"expected_sliced is not implemented for the {str(nx)} backend due"
             "to array assignment."
         )
-    n = X.shape[0]
+    ns = X.shape[0]
+    nt = Y.shape[0]
 
     log_dict = {}
     if log:
@@ -909,25 +926,41 @@ def expected_sliced(X, Y, thetas=None, n_proj=None, order=2, log=False, beta=0.0
         perm = sliced_permutations(
             X, Y, thetas=thetas, n_proj=n_proj, log=log, backend=nx
         )
-    plan = nx.zeros((n, n), type_as=X)
+
     n_proj = perm.shape[1]
-    range_array = nx.arange(n, type_as=X)
+    cost_k = nx.zeros(n_proj, type_as=X)
+    cost = 0 
 
     if beta != 0.0:  # computing the temperature weighting
         log_factors = nx.zeros(n_proj, type_as=X)  # for beta weighting
         for k in range(n_proj):
-            cost_k = nx.sum(nx.abs(X - Y[perm[:, k]]) ** order) / n
-            log_factors[k] = -beta * cost_k
+            cost_k[k] = nx.sum(nx.abs(X - Y[perm[:, k]]) ** order) / ns
+            log_factors[k] = -beta * cost_k[k]
         weights = nx.exp(log_factors - nx.logsumexp(log_factors))
+        cost = nx.sum(cost_k * weights)
 
     else:  # uniform weights
         weights = nx.ones(n_proj, type_as=X) / n_proj
 
-    for k in range(n_proj):  # populating the expected plan
-        # 1 / n is because is a permutation of [1, n]
-        plan[range_array, perm[:, k]] += (1 / n) * weights[k]
 
-    cost = (dist(X, Y, p=order) * plan).sum()
+    X_idx = nx.tile(nx.arange(ns, type_as=X), n_proj)
+    Y_idx = nx.reshape(perm.T, (-1))
+    weights = nx.repeat(weights, ns) / ns
+    plan = nx.coo_matrix(
+        weights,
+        X_idx,
+        Y_idx,
+        shape=(ns, nt),
+        type_as=X,
+    )
+
+    if beta == 0.0: #otherwise already computed above
+        cost = plan.multiply(dist(X, Y, p=order).T).sum()
+
+    if dense:
+        plan = nx.todense(plan)
+    elif str(nx) == "jax":
+        warnings.warn("JAX does not support sparse matrices, converting to dense")
 
     if log:
         return plan, cost, log_dict
