@@ -31,11 +31,11 @@ from ot.sliced import get_random_projections
 
 seed = 0
 np.random.seed(seed)
-n = 5
+n = 20
 d = 2
 X = np.random.randn(n, 2)
 Y = np.random.randn(n, 2) + np.array([5.0, 0.0])[None, :]
-n_proj = 2
+n_proj = 20
 thetas = get_random_projections(d, n_proj).T
 alpha = 0.3
 
@@ -51,7 +51,6 @@ min_plan[np.arange(n), min_perm] = 1 / n
 # ------------------------------------
 expected_plan, expected_cost, log_expected = ot.expected_sliced(X, Y, thetas, 
                                                                 log=True)
-print(expected_plan, np.sum(expected_plan, axis=1), np.sum(expected_plan, axis=0), np.sum(expected_plan))
 ##############################################################################
 # Compute 2-Wasserstein Plan
 # ------------------------------------
@@ -59,7 +58,6 @@ a = np.ones(n, device=X.device) / n
 dists = ot.dist(X, Y)
 W2 = ot.emd2(a, a, dists)
 W2_plan = ot.emd(a, a, dists)
-print(W2_plan)
 
 ##############################################################################
 # Plot resulting assignments
